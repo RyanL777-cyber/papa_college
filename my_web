@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>派對票券 QR 工具（產生 & 掃描）</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Noto Sans TC", Arial; margin: 24px; }
+    h2 { margin-top: 32px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 16px; width: 320px; }
+    .qr { display: flex; justify-content: center; margin-top: 8px; }
+    textarea { width: 100%; height: 160px; }
+    button { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; cursor: pointer; }
+    #reader { width: 360px; }
+    .ok { color: #0a7; font-weight: 600; }
+    .warn { color: #c90; font-weight: 600; }
+    .err { color: #d33; font-weight: 600; }
+    .small { color: #666; font-size: 12px; }
+    input[type=file] { margin-top: 8px; }
+    .kvs { font-size: 13px; color: #333; }
+    .kvs div { margin: 2px 0; }
+  </style>
+  <!-- 產 QR：qrcodejs -->
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs/qrcode.min.js"></script>
+  <!-- 相機掃碼：html5-qrcode -->
+  <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.10/html5-qrcode.min.js"></script>
+  <!-- 圖片解碼：jsQR（作為上傳圖片時的備援）-->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+</head>
+<body>
+  <h1>派對票券 QR 工具（產生 & 掃描）</h1>
+  <p class="small">提示：相機掃碼需要在 <b>HTTPS</b> 環境；GitHub Pages/Netlify/Vercel/Apps Script Web App 都有 HTTPS。</p>
+
+  <h2>① 載入測試資料（JSON）</h2>
+  <p>把你的名單貼進來（可先不含敏感欄位，之後用 ticket_id/token 對照）：</p>
+  <textarea id="jsonInput" placeholder='[{"name":"name1","party_role":"B","ticket_type":"Guest","email":"name1@example.com"}]'></textarea>
+  <div style="margin:8px 0;">
+    <input type="file" id="fileInput" accept=".json" /> 
+    <button id="loadBtn">載入 JSON</button>
+    <button id="genBtn">產生 QR（以本地資料為基準）</button>
+  </div>
+  <p class="small">* 教學版預設用 <b>ticket_id</b>（若沒有就以索引生成 T0001…）。正式活動可改成短 <b>token</b>（更安全），並只把 token 放進 QR。</p>
+
+  <div id="cards" class="row"></div>
+
+  <h2>② 掃碼驗證（相機）</h2>
+  <div id="reader"></div>
+  <div id="scanResult"></div>
+
+  <h2>③ 從圖片檔驗證（備援）</h2>
+  <input type="file" id="imgInput" accept="image/*" />
+  <div id="imgResult"></div>
+
+<script>
+let attendees = [];
+let indexByKey = new Map(); // key = ticket_id 或 token → attendee
+
+// 把 JSON 載入
+document.getElementById('loadBtn').onclick = () => {
+  try {
+    const val = document.getElementById('jsonInput').value.trim();
+    attendees = JSON.parse(val);
+    alert(`載入 ${attendees.length} 筆`);
+  } catch (e) {
+    alert('JSON 格式有誤：' + e.message);
+  }
+};
+
+// 也支援上傳 .json 檔
+document.getElementById('fileInput').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const text = await f.text();
+  document.getElementById('jsonInput').value = text;
+});
+
+// 產生 QR 卡片
+document.getElementById('genBtn').onclick = () => {
+  if (!attendees.length) {
+    alert('請先載入 JSON');
+    return;
+  }
+  indexByKey.clear();
+  const cards = document.getElementById('cards');
+  cards.innerHTML = '';
+
+  attendees.forEach((a, i) => {
+    // 決定此票的 key（建議改為 token；這裡示範 ticket_id）
+    if (!a.ticket_id) a.ticket_id = `T${String(i+1).padStart(4,'0')}`;
+
+    const payload = `TID=${a.ticket_id}`; // 教學版：只放 TID；正式建議放 token 或 URL?t=token
+
+    // 建卡片
+    const el = document.createElement('div');
+    el.className = 'card';
+    el.innerHTML = `
+      <div class="kvs">
+        <div><b>Name</b>: ${a.name ?? ''}</div>
+        <div><b>Ticket Type</b>: ${a.ticket_type ?? ''}</div>
+        <div><b>Party Role</b>: ${a.party_role ?? ''}</div>
+        <div><b>Ticket ID</b>: ${a.ticket_id}</div>
+      </div>
+      <div class="qr" id="qr_${i}"></div>
+      <div class="small">PAYLOAD: ${payload}</div>
+      <button id="dl_${i}">下載 PNG</button>
+    `;
+    cards.appendChild(el);
+
+    // 產 QR
+    const qrel = document.getElementById(`qr_${i}`);
+    const qr = new QRCode(qrel, {
+      text: payload,
+      width: 200,
+      height: 200,
+      correctLevel: QRCode.CorrectLevel.M // 可改 Q 提高容錯
+    });
+
+    // 下載按鈕
+    document.getElementById(`dl_${i}`).onclick = () => {
+      const img = qrel.querySelector('img') || qrel.querySelector('canvas');
+      const link = document.createElement('a');
+      link.download = `${a.ticket_type || 'Ticket'}_${a.name || 'guest'}_${a.ticket_id}.png`;
+      link.href = (img.tagName === 'IMG') ? img.src : img.toDataURL('image/png');
+      link.click();
+    };
+
+    // 建索引（掃到時做本地對照）
+    indexByKey.set(a.ticket_id, a);
+  });
+
+  alert('已產生 QR，試試掃碼或下載！');
+};
+
+// 相機掃碼
+const scanResult = document.getElementById('scanResult');
+function onScanSuccess(decodedText) {
+  // 解析我們的教學字串：形如 TID=XXXX
+  let key = null;
+  try {
+    if (decodedText.includes('TID=')) {
+      const u = new URLSearchParams(decodedText);
+      // 如果 decodedText 不是標準 query，也用備援解析
+      key = (u.get('TID')) || decodedText.split('TID=')[1];
+    }
+  } catch {
+    // 若不是 query 格式，嘗試簡單拆
+    if (decodedText.startsWith('TID=')) key = decodedText.slice(4);
+  }
+
+  const a = key ? indexByKey.get(key) : null;
+  if (a) {
+    scanResult.innerHTML = `<p class="ok">✅ 有效票：${a.name}（${a.ticket_type}，TID=${a.ticket_id}）</p>`;
+  } else {
+    scanResult.innerHTML = `<p class="err">❌ 未在本地名單找到：${decodedText}</p>`;
+  }
+}
+
+const html5QrCode = new Html5Qrcode("reader");
+Html5Qrcode.getCameras().then(devices => {
+  const camId = devices?.[0]?.id;
+  if (!camId) return;
+  html5QrCode.start(
+    { facingMode: "environment" }, // 後鏡頭
+    { fps: 10, qrbox: 250 },
+    onScanSuccess
+  ).catch(err => {
+    document.getElementById('reader').innerHTML = '<span class="small">相機啟動失敗：' + err + '</span>';
+  });
+}).catch(err => {
+  document.getElementById('reader').innerHTML = '<span class="small">找不到相機（桌機或無權限）。</span>';
+});
+
+// 圖片檔驗證（備援）
+document.getElementById('imgInput').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img,0,0);
+    const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+    const code = jsQR(imageData.data, canvas.width, canvas.height);
+    if (code) {
+      onScanSuccess(code.data);
+      document.getElementById('imgResult').innerHTML = `<p>解析成功：${code.data}</p>`;
+    } else {
+      document.getElementById('imgResult').innerHTML = `<p class="err">解析失敗，請換清晰一點的圖片。</p>`;
+    }
+  };
+  img.src = URL.createObjectURL(f);
+});
+</script>
+</body>
+</html>
